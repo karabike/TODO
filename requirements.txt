@@ -1,3 +1,7 @@
 fastapi
 uvicorn
 httpx
+sqlalchemy
+aiosqlite
+sqlmodel
+playwright
