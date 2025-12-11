@@ -1,16 +1,17 @@
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import asyncio
 import time
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field
 
-from sqlalchemy import Select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-from playwright.async_api import async_playwright
+from parser import CitilinkParser
+from wsconmanager import manager
 
 Base = declarative_base()
 engine = create_async_engine(
@@ -89,23 +90,19 @@ class Task(TaskUpdate):
     id: int
 
 
-tasks: list[Task] = []
-next_id = 1
-
-
 @app.get("/tasks", response_model=list[TaskModel])
 async def get_tasks(db: DBSession = Depends(get_db)):
-    stmnt = Select(TaskModel)
+    stmnt = select(TaskModel)
     result = await db.execute(stmnt)
     return result.scalars()
 
 
-@app.get("/tasks/{task_id}", response_model=Task)
+@app.get("/tasks/{task_id}", response_model=TaskModel)
 async def get_task(task_id: int, db: DBSession = Depends(get_db)):
-    for t in tasks:
-        if t.id == task_id:
-            return t
-    raise HTTPException(status_code=404, detail="Task not found")
+    obj = await db.get(TaskModel, task_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Tasks not found")
+    return obj
 
 
 @app.post("/tasks", response_model=Task, status_code=201)
@@ -120,18 +117,20 @@ async def create_task(task: TaskCreate, db: DBSession = Depends(get_db)):
     return new_task
 
 
-@app.put("/task/{task_id}", response_model=Task)
-async def update_task(task_id: int, updated: TaskUpdate):
-    for idx, t in enumerate(tasks):
-        if t.id == task_id:
-            tasks[idx] = Task(
-                id=t.id,
-                title=updated.title,
-                description=updated.description,
-                done=updated.done
-            )
-            return tasks[idx]
-    raise HTTPException(status_code=404, detail="Tasks not found")
+@app.put("/task/{task_id}", response_model=TaskModel)
+async def update_task(task_id: int, updated: TaskUpdate, db: DBSession = Depends(get_db)):
+    stmt = select(TaskModel).where(TaskModel.id == task_id)
+    result = await db.execute(stmt)
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Tasks not found")
+    task.title = updated.title
+    task.description = updated.description
+    task.done = updated.done
+
+    await db.commit()
+    await db.refresh(task)
+    return task
 
 
 @app.delete("/tasks/{task_id}", status_code=204)
@@ -196,7 +195,7 @@ async def cpu_task(n: int = 10000000000):
     }
 """
 
-
+"""
 class Product(BaseModel):
     name: str
     price: str
@@ -212,16 +211,15 @@ class CitilinkParser:
         self.browser = await playwright.chromium.launch(headless=True)
         context = await self.browser.new_context()
         self.page = await context.new_page()
-    
 
     async def load_page(self, url):
         await self.page.goto(url, timeout=150000)
         await self.page.wait_for_selector(
-            '[data-meta-name="SnippetProductVerticalLayout"]', 
+            '[data-meta-name="SnippetProductVerticalLayout"]',
             timeout=15000)
-        await asyncio.sleep(2) 
+        await asyncio.sleep(2)
 
-    async def parce_products(self) -> list [Product]:
+    async def parce_products(self) -> list[Product]:
         products = []
         cards = await self.page.query_selector_all(
             '[data-meta-name="SnippetProductVerticalLayout"]',)
@@ -245,6 +243,53 @@ class CitilinkParser:
             )
         return products
 
+class Product(BaseModel):
+    name: str
+    price: str
+    link: str
+
+
+class CitilinkParser:
+
+    BASE_URL = "https://www.citilink.ru"
+
+    async def start(self):
+        playwright = await async_playwright().start()
+        self.browser = await playwright.chromium.launch(headless=True)
+        context = await self.browser.new_context()
+        self.page = await context.new_page()
+
+    async def load_page(self, url):
+        await self.page.goto(url, timeout=150000)
+        await self.page.wait_for_selector(
+            '[data-meta-name="SnippetProductVerticalLayout"]',
+            timeout=15000)
+        await asyncio.sleep(2)
+
+    async def parce_products(self) -> list[Product]:
+        products = []
+        cards = await self.page.query_selector_all(
+            '[data-meta-name="SnippetProductVerticalLayout"]',)
+        print(f"Найдено товаров: {len(cards)}")
+        for card in cards:
+            name_el = await card.query_selector('[data-meta-name="Snippet__title"]')
+            name = await name_el.inner_text()
+
+            link_el = await card.query_selector('a[href*="/product/"]')
+            href = await link_el.get_attribute('href')
+            link = self.BASE_URL + href
+            price_el = await card.query_selector("[data-meta-price]")
+            price = await price_el.get_attribute("data-meta-price")
+
+            products.append(
+                Product(
+                    name=name,
+                    link=link,
+                    price=price
+                )
+            )
+        return products
+"""
 
 @app.get("/parser")
 async def parser(background_task: BackgroundTasks):
@@ -265,3 +310,20 @@ async def parser(background_task: BackgroundTasks):
     category_url = "https://www.citilink.ru/catalog/smartfony/"
     background_task.add_task(paginator, category_url, max_pages=5)
     return {"message": "Парсер запущен в фоне"}
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+
+    async def tick():
+        while True:
+            await websocket.send_text("tick")
+            await asyncio.sleep(10)
+    asyncio.create_task(tick())
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await manager.handle(data, websocket)
+    except WebSocketDisconnect:
+        await manager.disconnect(websocket)
