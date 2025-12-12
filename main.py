@@ -34,7 +34,6 @@ app = FastAPI(
     version="1.0"
 )
 
-# Флаг для отслеживания работающей задачи парсера
 parser_task = None
 
 
@@ -45,7 +44,6 @@ async def on_startup():
         await conn.run_sync(
             SQLModel.metadata.create_all
         )
-    # Запуск периодического парсинга при старте
     parser_task = asyncio.create_task(auto_parser())
 
 
@@ -142,8 +140,6 @@ async def auto_parser() -> None:
                     await db.close()
                 except Exception:
                     pass
-        
-        # Ждем 60 минут перед следующим запуском
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -175,8 +171,6 @@ async def create_task(task: TaskCreate, db: AsyncSession = Depends(get_db)):
     db.add(new_task)
     await db.commit()
     await db.refresh(new_task)
-    
-    # Отправляем уведомление подписчикам
     import json
     await manager.broadcast_to_channel(
         "tasks",
@@ -201,13 +195,9 @@ async def update_task(task_id: int, updated: TaskUpdate,
     task = result.scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="Tasks not found")
-    
-    # Проверяем, изменился ли статус done
     status_changed = (updated.done is not None and
                       task.done != updated.done)
     old_done_status = task.done
-    
-    # Обновляем только переданные поля
     if updated.title is not None:
         task.title = updated.title
     if updated.description is not None:
@@ -217,8 +207,6 @@ async def update_task(task_id: int, updated: TaskUpdate,
 
     await db.commit()
     await db.refresh(task)
-    
-    # Отправляем уведомление о изменении статуса
     if status_changed:
         import json
         await manager.broadcast_to_channel(
@@ -245,60 +233,6 @@ async def delete_task(task_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Tasks not found")
     await db.delete(obj)
     await db.commit()
-
-"""
-@app.get("/async_task")
-async def async_task():
-    await asyncio.sleep(60)
-    return {"message": "ok"}
-
-
-@app.get("/background_task")
-async def background_task(background_task: BackgroundTasks):
-    def slow_time():
-        import time
-        time.sleep(10)
-        print("ok")
-        print("ok")
-        print("ok")
-
-    background_task.add_task(slow_time)
-    return {"message": "task started"}
-
-
-excutor = ThreadPoolExecutor(max_workers=2)
-excutor = ProcessPoolExecutor(max_workers=2)
-
-
-def blocking_io_task():
-    import time
-
-    time.sleep(60)
-    return "ok"
-
-
-@app.get("/thread_pool_sleep")
-async def thread_pool_sleep():
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(excutor, blocking_io_task)
-    return {"message": result}
-
-
-def heavy_func(n: int):
-    result = 0
-    for i in range(n):
-        result += i * i
-    return result
-
-
-@app.get("/cpu_task")
-async def cpu_task(n: int = 10000000000):
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(excutor, heavy_func, n)
-    return {
-        "message": result
-    }
-"""
 
 
 @app.get("/parser")
@@ -352,7 +286,6 @@ async def websocket_tasks(websocket: WebSocket):
     await manager.connect_to_channel("tasks", websocket)
     try:
         while True:
-            # Слушаем сообщения от клиента (для keep-alive)
             data = await websocket.receive_text()
             if data == "close":
                 break

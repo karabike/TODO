@@ -5,7 +5,6 @@ from typing import Dict, List
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
-        # Разделяем подписчиков по типам событий
         self.channels: Dict[str, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket):
@@ -32,7 +31,6 @@ class ConnectionManager:
             except Exception:
                 disconnected.append(websocket)
 
-        # Удаляем отключенные соединения
         for websocket in disconnected:
             await self.disconnect_from_channel(channel, websocket)
 
